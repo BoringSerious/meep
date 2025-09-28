@@ -1,0 +1,434 @@
+import re
+import meep as mp
+import numpy as np
+import matplotlib.pyplot as plt
+
+# from LD_Ni import E_susceptibilities  # 移除這行，因為LD_Ni沒有導出這個變量
+#from meep.materials import Al
+# =============================================================================
+# 基本模拟参数设置
+# =============================================================================
+
+TiN = mp.Medium(
+    epsilon = 1.0,
+    E_susceptibilities=[
+        mp.LorentzianSusceptibility(frequency=4.437373717654432, gamma=2.070564619507932, sigma=2.301573035606308),
+        mp.LorentzianSusceptibility(frequency=6.975300502776048, gamma=2.905252562646776, sigma=2.1331212907332264),
+        mp.LorentzianSusceptibility(frequency=1.0, gamma=0.28017320458536504, sigma=18.033052766262013),
+        mp.LorentzianSusceptibility(frequency=1.044324542860307, gamma=1.0090345740893247, sigma=10.720738322625303),
+        mp.LorentzianSusceptibility(frequency=3.327044077347858, gamma=1.3051369516679447, sigma=0.8259366606048052),
+        mp.LorentzianSusceptibility(frequency=0.5368694199161055, gamma=0.5384290668385744, sigma=17.893025417604306),
+    ],
+    #D_conductivity = 1.5
+)
+
+TiO2 = mp.Medium(
+    epsilon = 1.0,
+    E_susceptibilities=[
+        mp.LorentzianSusceptibility(frequency= 3.5183855889818174, gamma=0.000, sigma=2.984928722556203),
+        mp.LorentzianSusceptibility(frequency=23.961282272945173, gamma=0.000, sigma=1.9278408201352615),
+    ]
+)
+
+cSi = mp.Medium(
+    epsilon = 1.0,
+    E_susceptibilities=[
+        mp.LorentzianSusceptibility(frequency = 3.1509358574982125,gamma = 0.271117211452919,sigma = 1.1925160516071505),
+        mp.LorentzianSusceptibility(frequency = 2.8429483239182396,gamma = 0.14769035876977007,sigma = 0.7617295752206349),
+        mp.LorentzianSusceptibility(frequency = 5.396788929096658,gamma = 0.8503168069786683,sigma = 0.7995578893180714),
+        mp.LorentzianSusceptibility(frequency = 4.2614598766415615,gamma = 0.9636579962679307,sigma = 1.7158438709272308),
+        mp.LorentzianSusceptibility(frequency = 2.7427801033565933,gamma = 0.1260329175171949,sigma = 1.0868786584798313),
+        mp.LorentzianSusceptibility(frequency = 2.9782052328912165,gamma = 0.20323296072931452,sigma = 0.9671033044046521),
+        mp.LorentzianSusceptibility(frequency = 3.4294988136475264,gamma = 0.4054899662286895,sigma = 4.774216542978489),
+    ]
+)
+# 空间分辨率
+resolution = 91  # pixels/μm
+cou = 0.3
+
+# 边界层厚度
+dpml = 1.5  # PML厚度
+dsub = 0.5  # 基底厚度
+dpad = 0.5  # 填充厚度
+
+# Metasurface参数 (3D环境)
+period_z = 0.5  # X方向周期 (μm) 
+period_y = 0.5  # Y方向周期 (μm) 
+height = 2.0     # metasurface高度 (μm) - 2μm
+duty_cycle = 0.5 # 占空比 (暂时固定)
+
+# 频率参数 (可见光频段)
+min_wavelength = 0.22  # 最小波长 (μm)
+max_wavelength = 3.0  # 最大波长 (μm)
+lcen = 0.5*(min_wavelength + max_wavelength)  # center wavelength (μm)
+fcen = 1 / lcen  # center frequency
+df = (1/min_wavelength - 1.0/max_wavelength)*1.8  # frequency width
+
+# =============================================================================
+# 边界条件设置
+# =============================================================================
+
+# PML层设置 (只在X方向，Y和Z使用周期性边界)
+pml_layers = [mp.PML(thickness=dpml, direction=mp.X)]
+
+
+# 周期性边界条件 (Y和Z方向周期性)
+k_point = mp.Vector3(0, 0, 0)  # 表示Y和Z方向的周期性
+
+# =============================================================================
+# 材料定义
+# =============================================================================
+
+# 基底材料 - 玻璃
+air = mp.Medium(index=1.0)
+pec = mp.perfect_electric_conductor
+
+# 默认材料设置为玻璃
+default_material = air
+
+# =============================================================================
+# 计算域尺寸计算
+# =============================================================================
+
+# 3D计算域尺寸
+sx = dpml + dsub + height + dpad + dpml  # X方向总长度=pml+sub+height+pad+pml=1.0+2.0+2.0+2.0+1.0=8.0
+sy = period_y  # Y方向长度 (单个单元)
+sz = period_z  # Z方向长度 (单个单元)
+
+# 计算域尺寸 (3D环境)
+cell_size = mp.Vector3(sx, sy, sz)
+
+
+# =============================================================================
+# 几何结构定义
+# =============================================================================
+
+def make_geometry(
+    r_b = 0.2,
+    r_c = 0.23,
+    width_z = sz,
+    width_y = sy,
+    ring1_thickness = 0.09,
+    ring2_thickness = 0.02,
+    spacer_thickness = 0.04,
+    reflector_thickness = 0.15,
+    substrate_thickness = 3.0):
+
+    geometry = []
+    geometry.append(
+    mp.Block(
+        material=air,
+        size=mp.Vector3(sx, sy, sz),
+        center=mp.Vector3(0, 0, 0),
+    ))
+
+    import math
+
+    core_thickeness = 6*(ring1_thickness + ring2_thickness)
+    #adding mutiple rings
+    for i in range(6):
+        #rings(pe c)
+        geometry.append(
+            mp.Cylinder(
+                radius = r_c,
+                height = ring1_thickness,
+                center = mp.Vector3(i*(ring1_thickness + ring2_thickness), 0, 0),
+                axis = mp.Vector3(1, 0, 0),
+                material = TiN
+            )
+        )
+        #rings(TiO_2)
+        geometry.append(
+            mp.Cylinder(
+                radius = r_c,
+                height = ring1_thickness,
+                center = mp.Vector3((i+0.5)*(ring1_thickness + ring2_thickness), 0, 0),
+                axis = mp.Vector3(1, 0, 0),
+                material = TiO2
+            )
+        )
+    #adding base, including spacer, reflector, and substrate.
+    s_position = -0.5*spacer_thickness-0.5*ring1_thickness
+    geometry.append(
+    mp.Block(
+        material=TiO2,
+        size=mp.Vector3(spacer_thickness, width_z, width_y),
+        center=mp.Vector3(s_position, 0, 0),
+    )) #spacer
+
+    r_position = -0.5*ring1_thickness - spacer_thickness - 0.5*reflector_thickness
+    geometry.append(
+    mp.Block(
+        material=TiN,
+        size=mp.Vector3(reflector_thickness, width_z, width_y),
+        center=mp.Vector3(r_position, 0, 0),
+    )) #reflector
+
+    sub_position = -0.5*ring1_thickness - spacer_thickness - reflector_thickness - 0.5*substrate_thickness
+    geometry.append(
+    mp.Block(
+        material=cSi,
+        size=mp.Vector3(substrate_thickness, width_z, width_y),
+        center=mp.Vector3(sub_position, 0, 0),
+    )) #substrate
+
+    #core cylinder
+    core_position = 0.5*core_thickeness-0.5*ring1_thickness
+    geometry.append(
+    mp.Cylinder(
+        radius = r_b,
+        height = core_thickeness,
+        center = mp.Vector3(core_position, 0, 0),
+        axis = mp.Vector3(1, 0, 0),
+        material = TiO2
+    ))
+    
+    return geometry
+
+geometry = make_geometry(
+    r_b = 0.2,
+    r_c = 0.23,
+    width_z = period_z,
+    width_y = period_y,
+    ring1_thickness = 0.09,
+    ring2_thickness = 0.02,
+    spacer_thickness = 0.04,
+    reflector_thickness = 0.15,
+    substrate_thickness = 0.8
+)
+
+
+      
+
+
+# =============================================================================
+# 光源设置
+# =============================================================================
+
+# 光源位置计算
+# 位置：原点和上方PML底部的中间
+source_x = 0.5 * sx - dpml - 0.5 * dpad  # 在填充区域中间=5.0-1.0-1.0=3.0
+source_position = mp.Vector3(source_x, 0, 0)
+
+# 高斯脉冲光源
+gaussian_source = mp.GaussianSource(frequency=fcen, fwidth=df, is_integrated=True)
+
+# 平面光源定义
+sources = [
+    mp.Source(
+        gaussian_source,
+        component=mp.Ey,  # Ey极化
+        center=source_position,
+        size=mp.Vector3(0, sy, sz),  # 平面光源，覆盖整个Y-Z平面
+    )
+]
+
+# =============================================================================
+# 创建Simulation对象和截面打印功能
+# =============================================================================
+
+wavelengths = np.linspace(min_wavelength, max_wavelength, 181) #wavelength points
+frequencies = 1.0 / wavelengths  # Meep: 频率数组，用于监控器
+
+# DFT monitor设置
+# Meep: DFT(离散傅里叶变换)监控器，用于频域分析
+dft_freqs = [1.0/min_wavelength, fcen, 1.0/max_wavelength]  # 监控三个关键频率
+
+
+# 创建Simulation对象
+sim = mp.Simulation(
+    resolution=resolution,
+    cell_size=cell_size,
+    boundary_layers=pml_layers,
+    geometry = [],
+    symmetries=[mp.Mirror(mp.Y,phase=-1)],
+    k_point=k_point,
+    sources=sources,  # 添加光源
+    #Courant = cou  #if NaN or Inf errors, try decreasing this  # Meep: Courant数，控制时间步长稳定性
+)
+
+# 添加DFT场监控器，捕获指定频率的电场分布
+dft_fields = sim.add_dft_fields(
+    [mp.Ey],  # 捕获Ey电场分量
+    dft_freqs,  # 监控的频率列表
+    center=mp.Vector3(0, 0, 0),  # 监控区域中心
+    size=mp.Vector3(sx, sy, sz)  # 监控整个计算域
+)
+
+# 添加平面flux monitors
+flux_px = sim.add_flux(
+    frequencies, 
+    mp.FluxRegion(
+        center=mp.Vector3(source_x-0.2, 0, 0), 
+        size=mp.Vector3(0, sy, sz)  # 平面monitor，覆盖Y-Z平面
+    )
+)
+
+flux_mx = sim.add_flux(
+    frequencies, 
+    mp.FluxRegion(
+        center=mp.Vector3(-source_x, 0, 0), 
+        size=mp.Vector3(0, sy, sz)  # 平面monitor，覆盖Y-Z平面
+    ))
+print("\n截面图像已显示!")
+print("=" * 50)
+print("Monitor设置:")
+print(f"DFT Monitor:")
+print(f"- 监控频率: {len(dft_freqs)}个频率点")
+print(f"- 频率1: {dft_freqs[0]:.3f} (1/μm) - {1/dft_freqs[0]:.3f} μm ({1/dft_freqs[0]*1000:.0f}nm)")
+print(f"- 频率2: {dft_freqs[1]:.3f} (1/μm) - {1/dft_freqs[1]:.3f} μm ({1/dft_freqs[1]*1000:.0f}nm)")
+print(f"- 频率3: {dft_freqs[2]:.3f} (1/μm) - {1/dft_freqs[2]:.3f} μm ({1/dft_freqs[2]*1000:.0f}nm)")
+print(f"- 监控区域: 整个计算域 ({sx:.1f} × {sy:.1f} × {sz:.1f} μm)")
+print(f"- 捕获场: Ey电场分量")
+print(f"\nFlux Monitors:")
+print(f"- Monitor 1: x=1.5 (metasurface上方)")
+print(f"- Monitor 2: x=-2 (metasurface下方)")
+print(f"- 类型: 平面monitor (覆盖Y-Z平面)")
+print(f"- 尺寸: {sy:.3f} × {sz:.3f} μm")
+print(f"- 监控频率: {len(frequencies)}个频率点")
+print("\n周期性Metasurface说明:")
+print("- 模拟单个单元 (220nm × 220nm)")
+print("- Y和Z方向自动周期性重复")
+print("- X方向使用PML吸收边界")
+print("- 相当于无限大的周期性metasurface")
+print("\n下一步:")
+print("1. 运行模拟")
+print("2. 分析DFT结果")
+print("3. 可视化电场分布")
+
+# =============================================================================
+# 运行模拟和电场分布检测
+# =============================================================================
+
+print("\n开始运行模拟...")
+print("=" * 50)
+
+# 运行模拟 - 参考tt7的停止条件
+sim.run(until_after_sources=mp.stop_when_fields_decayed(5, mp.Ey, mp.Vector3(0, 0, 0), 1e-4))
+
+flux_mx_empty = sim.get_flux_data(flux_mx)
+flux_px_empty = sim.get_flux_data(flux_px)
+
+print("模拟完成!")
+
+# 模拟运行后显示截面图 - 参考tt7的方式
+print("\n正在显示模拟后的截面图...")
+sim.plot2D(output_plane=mp.Volume(center=mp.Vector3(0, 0, 0), size=mp.Vector3(sx, sy, 0)))
+plt.title("XY Cross-section After Simulation")
+plt.xlabel("X (μm)")
+plt.ylabel("Y (μm)")
+plt.show()
+
+sim.plot2D(output_plane=mp.Volume(center=mp.Vector3(0, 0, 0), size=mp.Vector3(0, sy, sz)))
+plt.title("YZ Cross-section After Simulation")
+plt.xlabel("Y (μm)")
+plt.ylabel("Z (μm)")
+plt.show()
+
+print("\n正在记录入射强度...")
+
+# 记录入射强度 - 修正flux方向问题
+# 使用monitor2 (x=-2) 记录入射强度，因为光从上方入射
+# 由于光向-X方向传播，flux为负值，需要取绝对值
+incident_intensity = np.abs(np.array(mp.get_fluxes(flux_px)))   #/ (sy * sz)  # 归一化到单位面积
+
+
+print("入射强度记录完成!")
+print(f"原始flux范围: {np.array(mp.get_fluxes(flux_mx)).min():.6f} - {np.array(mp.get_fluxes(flux_mx)).max():.6f}")
+print(f"入射强度范围: {incident_intensity.min():.6f} - {incident_intensity.max():.6f}")
+print("说明: 由于光向-X方向传播，原始flux为负值，已取绝对值")
+
+# 绘制入射强度随波长的变化 - 参考tt7的方式
+plt.figure(figsize=(10, 6))
+plt.plot(wavelengths, incident_intensity, 'b-', linewidth=2)
+plt.xlabel('Wavelength (μm)')
+plt.ylabel('Incident Intensity')
+plt.title('Incident Intensity vs Wavelength')
+plt.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.show()
+
+print("\n正在生成电场分布图...")
+
+# 简单的实时电场分布显示 - 只显示XZ截面
+for f in range(len(dft_freqs)):
+    Ey_f = sim.get_dft_array(dft_fields, mp.Ey, f)
+    
+    # 获取3D数组的中间切片
+    nx, ny, nz = Ey_f.shape
+    
+    # XZ截面 (Y=0平面)
+    xz_slice = Ey_f[:, ny//2, :]
+    plt.imshow(np.real(xz_slice), extent=[-sz/2, sz/2, -sx/2, sx/2], cmap='RdBu')
+    plt.title(f"XZ Cross-section Ey Field - {1./dft_freqs[f]:.3f}μm")
+    plt.show()
+
+
+
+
+
+
+
+
+
+# Meep: 重置仿真对象，清除所有数据，准备第二次仿真
+sim.reset_meep()
+
+sim = mp.Simulation(
+    resolution=resolution,
+    cell_size=cell_size,
+    boundary_layers=pml_layers,
+    geometry=geometry,
+    k_point=k_point,
+    symmetries=[mp.Mirror(mp.Y,phase=-1)],
+    sources=sources,  # 添加光源
+    Courant = cou  #if NaN or Inf errors, try decreasing this  # Meep: Courant数，控制时间步长稳定性
+)
+
+# 添加平面flux monitors
+flux_px = sim.add_flux(
+    frequencies, 
+    mp.FluxRegion(
+        center=mp.Vector3(source_x-0.2, 0, 0), 
+        size=mp.Vector3(0, sy, sz)  # 平面monitor，覆盖Y-Z平面
+    )
+)
+
+flux_mx = sim.add_flux(
+    frequencies, 
+    mp.FluxRegion(
+        center=mp.Vector3(-source_x, 0, 0), 
+        size=mp.Vector3(0, sy, sz)  # 平面monitor，覆盖Y-Z平面
+    )
+)
+
+sim.load_minus_flux_data(flux_px, flux_px_empty)
+
+sim.run(until_after_sources=mp.stop_when_fields_decayed(5, mp.Ey, mp.Vector3(0, 0, 0), 2e-3))
+
+sim.plot2D(output_plane=mp.Volume(center=mp.Vector3(0, 0, 0), size=mp.Vector3(sx, sy, 0)))
+plt.title("XY Cross-section After Simulation")
+plt.show()
+
+sim.plot2D(output_plane=mp.Volume(center=mp.Vector3(0, 0, 0), size=mp.Vector3(0, sy, sz)))
+plt.title("YZ Cross-section After Simulation")
+plt.show()
+
+flux_p_data = np.array(mp.get_fluxes(flux_px))
+flux_m_data = np.array(mp.get_fluxes(flux_mx))
+
+#A = abs_cross_section #/ (sy * sz)
+T = np.abs(flux_m_data / incident_intensity)
+R = np.abs(flux_p_data / incident_intensity)
+A = 1 - R - T
+
+plt.plot(wavelengths, A,  color = 'red')
+plt.plot(wavelengths, R,  color = 'blue')
+plt.plot(wavelengths, T,  color = 'green')
+#plt.plot(wavelengths, flux_p_data,  color = 'green')
+#plt.plot(wavelengths, -flux_m_data,  color = 'blue')
+#plt.plot(wavelengths, flux_p_data_abs,  color = 'orange')
+#plt.plot(wavelengths, -flux_m_data_abs,  color = 'purple')
+#plt.plot(wavelengths, incident_intensity,  color = 'red')
+plt.ylim(0.0, 1.0)
+plt.show()
